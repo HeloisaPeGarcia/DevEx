@@ -1,0 +1,84 @@
+# Visual Studio workspace and user state
+.vs/
+*.user
+*.userosscache
+*.suo
+*.rsuser
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+
+# Build output
+[Dd]ebug/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+**/[Dd]ebug/
+**/[Rr]elease/
+**/x64/
+**/x86/
+bin/
+obj/
+out/
+build/
+Build/
+
+# MSBuild and compiler intermediates
+*.tlog
+*.lastbuildstate
+*.idb
+*.ipdb
+*.iobj
+*.ilk
+*.log
+*.obj
+*.pch
+*.pdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tmp
+*.unsuccessfulbuild
+
+# Native binaries and libraries
+*.exe
+*.dll
+*.lib
+*.exp
+*.a
+*.so
+*.dylib
+
+# CMake, Ninja, and package manager caches
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+compile_commands.json
+.ninja_deps
+.ninja_log
+vcpkg_installed/
+packages/
+
+# Node sample app dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment and generated application state
+.env
+.env.*
+!.env.example
+*.local
+orbitdesktop.environments.tsv
+**/orbitdesktop.environments.tsv
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.bak

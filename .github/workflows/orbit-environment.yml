@@ -1,0 +1,98 @@
+name: Orbit Environment
+
+on:
+  repository_dispatch:
+    types:
+      - orbitdesktop.launch
+      - orbitdesktop.destroy
+  workflow_dispatch:
+    inputs:
+      action:
+        description: launch or destroy
+        required: true
+        default: launch
+      branch:
+        description: Branch to deploy
+        required: true
+        default: main
+      environment_id:
+        description: Preview environment ID
+        required: true
+        default: env-local
+      ttl_hours:
+        description: Environment TTL in hours
+        required: true
+        default: "2"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  IMAGE_NAME: orbitdesktop-sample
+  REGISTRY: ghcr.io
+
+jobs:
+  launch:
+    if: github.event.action == 'orbitdesktop.launch' || github.event.inputs.action == 'launch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve payload
+        id: payload
+        shell: bash
+        run: |
+          echo "branch=${{ github.event.client_payload.branch || github.event.inputs.branch }}" >> "$GITHUB_OUTPUT"
+          echo "environment_id=${{ github.event.client_payload.environment_id || github.event.inputs.environment_id }}" >> "$GITHUB_OUTPUT"
+          echo "ttl_hours=${{ github.event.client_payload.ttl_hours || github.event.inputs.ttl_hours }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.payload.outputs.branch }}
+
+      - name: Build container image
+        run: |
+          docker build -t $REGISTRY/${{ github.repository_owner }}/$IMAGE_NAME:${{ github.sha }} examples/sample-app
+
+      - name: Terraform plan
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false
+          terraform plan \
+            -var="environment_id=${{ steps.payload.outputs.environment_id }}" \
+            -var="image_tag=${{ github.sha }}" \
+            -var="ttl_hours=${{ steps.payload.outputs.ttl_hours }}"
+
+      - name: Terraform apply placeholder
+        working-directory: infra/terraform
+        run: |
+          echo "terraform apply would run here in a configured cloud account"
+
+      - name: Render Kubernetes manifests
+        run: |
+          echo "kubectl apply -f infra/k8s would deploy the preview namespace"
+
+      - name: Publish environment summary
+        run: |
+          echo "### OrbitDesktop environment" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: ${{ steps.payload.outputs.branch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: ${{ steps.payload.outputs.environment_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- URL: https://${{ steps.payload.outputs.environment_id }}.preview.example.com" >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    if: github.event.action == 'orbitdesktop.destroy' || github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform destroy placeholder
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false
+          echo "terraform destroy would remove the preview environment"
+
+      - name: Kubernetes cleanup placeholder
+        run: |
+          echo "kubectl delete namespace ${{ github.event.client_payload.environment_id || github.event.inputs.environment_id }}"
+

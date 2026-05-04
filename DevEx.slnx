@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="DevEx/DevEx.vcxproj" Id="420790e1-6ce7-41c3-92e4-5d2c64ba3490" />
+</Solution>
