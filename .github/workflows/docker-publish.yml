@@ -6,7 +6,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -18,6 +17,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --- NOVO PASSO AQUI ---
+      # Pega o nome do repositório, converte para minúsculas e salva na variável IMAGE_NAME
+      - name: Formatar nome da imagem para minúsculas
+        run: |
+          echo "IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       # Loga no GitHub Container Registry
       - name: Log into registry ${{ env.REGISTRY }}
@@ -31,7 +36,7 @@ jobs:
       - name: Setup pack CLI
         uses: buildpacks/github-actions/setup-pack@v5.0.0
 
-      # Constrói e publica a imagem magicamente sem Dockerfile
+      # Constrói e publica a imagem (agora usando a variável minúscula)
       - name: Build and Publish with Buildpacks
         run: |
           pack build ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
