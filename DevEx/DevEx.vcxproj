@@ -127,7 +127,24 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Types.h" />
+    <ClInclude Include="TextUtil.h" />
+    <ClInclude Include="Terminal.h" />
+    <ClInclude Include="CredentialVault.h" />
+    <ClInclude Include="GitProvider.h" />
+    <ClInclude Include="EnvironmentStore.h" />
+    <ClInclude Include="Orchestrator.h" />
+    <ClInclude Include="OrbitDesktopApp.h" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="DevEx.cpp" />
+    <ClCompile Include="TextUtil.cpp" />
+    <ClCompile Include="Terminal.cpp" />
+    <ClCompile Include="CredentialVault.cpp" />
+    <ClCompile Include="GitProvider.cpp" />
+    <ClCompile Include="EnvironmentStore.cpp" />
+    <ClCompile Include="Orchestrator.cpp" />
+    <ClCompile Include="OrbitDesktopApp.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
