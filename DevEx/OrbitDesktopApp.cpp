@@ -1,10 +1,13 @@
 #include "OrbitDesktopApp.h"
 #include "Terminal.h"
 #include "TextUtil.h"
+#include "CostEstimator.h"
+#include "NetworkManager.h"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <thread>
+#include <cstdlib>
 
 using Clock = std::chrono::system_clock;
 using namespace std::chrono_literals;
@@ -12,13 +15,17 @@ using namespace std::chrono_literals;
 OrbitDesktopApp::OrbitDesktopApp()
     : gitProvider(std::make_unique<SimulatedGitProvider>()),
       orchestrator(std::make_unique<SimulatedEnvironmentOrchestrator>()),
-      store("orbitdesktop.environments.tsv")
+      store([]() {
+          const char* envPath = std::getenv("ORBIT_STORE_PATH");
+          return envPath ? std::string(envPath) : "orbitdesktop.environments.tsv";
+      }())
 {
     templates = {
         {"web-postgres", "Web + PostgreSQL", "Web app hosting with temporary PostgreSQL instance", 0.42, false},
         {"api-redis", "API + Redis", "Backend API microservice with isolated temporary Redis", 0.36, false},
         {"fullstack", "Frontend + API + PostgreSQL", "Complete multi-tier stack for end-to-end testing", 0.78, false},
         {"microservice-k8s", "Kubernetes Namespace", "Dedicated namespace with HPA, secrets, and ingress ingress", 1.15, true},
+        {"local-k8s", "Local Kubernetes", "Deploy directly to local Minikube/k3d cluster", 0.00, false},
     };
 }
 
@@ -47,9 +54,10 @@ void OrbitDesktopApp::Run()
         std::cout << "3. View Environment Logs\n";
         std::cout << "4. Nuke: Destroy Environment\n";
         std::cout << "5. Infrastructure Templates\n";
+        std::cout << "6. Extend TTL (+2 hours)\n";
         std::cout << "0. Exit\n\n";
 
-        switch (Terminal::ReadOption("Choose an option: ", 0, 5))
+        switch (Terminal::ReadOption("Choose an option: ", 0, 6))
         {
         case 1:
             OpenCatalog();
@@ -65,6 +73,9 @@ void OrbitDesktopApp::Run()
             break;
         case 5:
             ShowTemplates();
+            break;
+        case 6:
+            ExtendTtl();
             break;
         case 0:
             running = false;
@@ -137,7 +148,6 @@ void OrbitDesktopApp::OpenCatalog()
 
     SelectBranchAndLaunch(matches[static_cast<std::size_t>(selectedProject - 1)]);
 }
-
 void OrbitDesktopApp::SelectBranchAndLaunch(const Repository& repository)
 {
     Terminal::Header("One-Click Provisioning");
@@ -171,13 +181,34 @@ void OrbitDesktopApp::SelectBranchAndLaunch(const Repository& repository)
     const int ttlHours = SelectTtlHours();
     const std::string branch = repository.branches[static_cast<std::size_t>(selectedBranch - 1)];
 
+    double infracostCost = CostEstimator::GetMonthlyCostEstimate("infracost-report.json");
+    double monthlyEstimate = (infracostCost >= 0.0) ? infracostCost : (selectedTemplate.hourlyCostUsd * 24 * 30);
+
     std::cout << "\nLaunch Summary:\n";
     std::cout << "  Repository: " << repository.owner << "/" << repository.name << "\n";
     std::cout << "  Branch:     " << branch << "\n";
     std::cout << "  Template:   " << selectedTemplate.name << "\n";
     std::cout << "  TTL:        " << ttlHours << "h\n";
-    std::cout << "  Hourly Cost: US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd << "\n";
-    std::cout << "  Max Total Cost Estimate: US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd * ttlHours << "\n";
+    
+    if (infracostCost >= 0.0)
+    {
+        std::cout << "  Cost (Infracost monthly): US$ " << std::fixed << std::setprecision(2) << infracostCost << "\n";
+    }
+    else
+    {
+        std::cout << "  Hourly Cost: US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd << "\n";
+        std::cout << "  Max Total Cost Estimate: US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd * ttlHours << "\n";
+    }
+    std::cout << "  Estimated Monthly Cost:  US$ " << std::fixed << std::setprecision(2) << monthlyEstimate << "\n";
+
+    if (monthlyEstimate > 50.0 && session->role != UserRole::Admin)
+    {
+        std::cout << "\n[FinOps Policy Alert] Launch denied! Estimated monthly cost (US$ " 
+                  << std::fixed << std::setprecision(2) << monthlyEstimate 
+                  << ") exceeds developer limit of US$ 50.00. Admin role required.\n";
+        Terminal::Pause();
+        return;
+    }
 
     const std::string confirmation = Terminal::ReadLine("\nLaunch Environment? (y/n): ");
     std::string cleanConf = TextUtil::ToLower(TextUtil::Trim(confirmation));
@@ -260,6 +291,16 @@ void OrbitDesktopApp::Provision(const Repository& repository, const std::string&
         environment = orchestrator->Launch(*session, repository, branch, selectedTemplate, ttlHours, onUpdate);
         environments.push_back(environment);
         store.Save(environments);
+    }
+
+    if (selectedTemplate.id == "local-k8s")
+    {
+        std::string appUrl = environment.appUrl;
+        if (appUrl.rfind("https://", 0) == 0)
+        {
+            appUrl = appUrl.substr(8);
+        }
+        NetworkManager::UpdateHostsEntry(appUrl, "127.0.0.1");
     }
 
     std::cout << "\nPreview environment build triggered in background.\n";
@@ -528,4 +569,286 @@ std::string OrbitDesktopApp::RoleName(UserRole role)
     }
 
     return "Unknown";
+}
+
+bool OrbitDesktopApp::RunHeadlessLaunch(const std::string& repoPath, const std::string& branch, const std::string& templateId, int ttlHours)
+{
+    const char* envToken = std::getenv("ORBIT_TOKEN");
+    if (!envToken)
+    {
+        std::cerr << "{\"error\": \"Authentication failed: ORBIT_TOKEN environment variable not set.\"}\n";
+        return false;
+    }
+
+    UserSession authenticated = credentialVault.Authenticate(envToken);
+    if (authenticated.username.empty())
+    {
+        std::cerr << "{\"error\": \"Authentication failed: Invalid ORBIT_TOKEN.\"}\n";
+        return false;
+    }
+    session = authenticated;
+
+    environments = store.Load();
+
+    repositories = gitProvider->FetchRepositories(*session);
+    const Repository* targetRepo = nullptr;
+    for (const auto& r : repositories)
+    {
+        if (r.owner + "/" + r.name == repoPath)
+        {
+            targetRepo = &r;
+            break;
+        }
+    }
+
+    if (!targetRepo)
+    {
+        std::cerr << "{\"error\": \"Repository not found or access denied: " << repoPath << "\"}\n";
+        return false;
+    }
+
+    bool branchExists = false;
+    for (const auto& b : targetRepo->branches)
+    {
+        if (b == branch)
+        {
+            branchExists = true;
+            break;
+        }
+    }
+
+    if (!branchExists)
+    {
+        std::cerr << "{\"error\": \"Branch not found: " << branch << "\"}\n";
+        return false;
+    }
+
+    const EnvironmentTemplate* targetTemplate = nullptr;
+    for (const auto& t : templates)
+    {
+        if (t.id == templateId)
+        {
+            targetTemplate = &t;
+            break;
+        }
+    }
+
+    if (!targetTemplate)
+    {
+        std::cerr << "{\"error\": \"Template not found: " << templateId << "\"}\n";
+        return false;
+    }
+
+    if (!gitProvider->CanLaunch(*session, *targetRepo, *targetTemplate))
+    {
+        std::cerr << "{\"error\": \"Permission denied for template " << templateId << "\"}\n";
+        return false;
+    }
+
+    auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+        std::lock_guard<std::mutex> lock(environmentsMutex);
+        for (auto& env : environments)
+        {
+            if (env.id == id)
+            {
+                env.status = status;
+                if (!logLine.empty())
+                {
+                    env.logs.push_back(logLine);
+                }
+                store.Save(environments);
+                break;
+            }
+        }
+    };
+
+    Environment environment;
+    {
+        std::lock_guard<std::mutex> lock(environmentsMutex);
+        environment = orchestrator->Launch(*session, *targetRepo, branch, *targetTemplate, ttlHours, onUpdate);
+        environments.push_back(environment);
+        store.Save(environments);
+    }
+
+    std::cout << "{\n"
+              << "  \"id\": \"" << environment.id << "\",\n"
+              << "  \"status\": \"" << EnvironmentStore::StatusName(environment.status) << "\",\n"
+              << "  \"repository\": \"" << environment.repository << "\",\n"
+              << "  \"branch\": \"" << environment.branch << "\",\n"
+              << "  \"appUrl\": \"" << environment.appUrl << "\"\n"
+              << "}\n";
+
+    return true;
+}
+
+bool OrbitDesktopApp::RunHeadlessNuke(const std::string& envId)
+{
+    const char* envToken = std::getenv("ORBIT_TOKEN");
+    if (!envToken)
+    {
+        std::cerr << "{\"error\": \"Authentication failed: ORBIT_TOKEN environment variable not set.\"}\n";
+        return false;
+    }
+
+    UserSession authenticated = credentialVault.Authenticate(envToken);
+    if (authenticated.username.empty())
+    {
+        std::cerr << "{\"error\": \"Authentication failed: Invalid ORBIT_TOKEN.\"}\n";
+        return false;
+    }
+    session = authenticated;
+
+    environments = store.Load();
+
+    std::lock_guard<std::mutex> lock(environmentsMutex);
+    for (auto& env : environments)
+    {
+        if (env.id == envId)
+        {
+            if (env.status == EnvironmentStatus::Destroyed || env.status == EnvironmentStatus::Expired)
+            {
+                std::cerr << "{\"error\": \"Environment already terminated.\"}\n";
+                return false;
+            }
+
+            env.status = EnvironmentStatus::Destroying;
+            store.Save(environments);
+
+            auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+                std::lock_guard<std::mutex> callbackLock(environmentsMutex);
+                for (auto& e : environments)
+                {
+                    if (e.id == id)
+                    {
+                        e.status = status;
+                        if (!logLine.empty())
+                        {
+                            e.logs.push_back(logLine);
+                        }
+                        store.Save(environments);
+                        break;
+                    }
+                }
+            };
+
+            Environment envCopy = env;
+            std::thread([this, envCopy, onUpdate]() {
+                orchestrator->Destroy(const_cast<Environment&>(envCopy), onUpdate);
+            }).detach();
+
+            std::cout << "{\n"
+                      << "  \"id\": \"" << envId << "\",\n"
+                      << "  \"status\": \"Destroying\"\n"
+                      << "}\n";
+            return true;
+        }
+    }
+
+    std::cerr << "{\"error\": \"Environment not found: " << envId << "\"}\n";
+    return false;
+}
+
+void OrbitDesktopApp::RunHeadlessList() const
+{
+    std::vector<Environment> envs = store.Load();
+    std::cout << "[\n";
+    for (std::size_t i = 0; i < envs.size(); ++i)
+    {
+        const auto& env = envs[i];
+        std::cout << "  {\n"
+                  << "    \"id\": \"" << env.id << "\",\n"
+                  << "    \"repository\": \"" << env.repository << "\",\n"
+                  << "    \"branch\": \"" << env.branch << "\",\n"
+                  << "    \"template\": \"" << env.templateName << "\",\n"
+                  << "    \"status\": \"" << EnvironmentStore::StatusName(env.status) << "\",\n"
+                  << "    \"appUrl\": \"" << env.appUrl << "\"\n"
+                  << "  }" << (i + 1 < envs.size() ? "," : "") << "\n";
+    }
+    std::cout << "]\n";
+}
+
+void OrbitDesktopApp::RunDaemon()
+{
+    std::cout << "[OrbitDaemon] Initializing headless daemon service...\n";
+    std::cout << "[OrbitDaemon] Monitoring active environments for automatic TTL expiration...\n";
+
+    while (true)
+    {
+        environments = store.Load();
+        const std::time_t now = Clock::to_time_t(Clock::now());
+        bool changesMade = false;
+
+        {
+            std::lock_guard<std::mutex> lock(environmentsMutex);
+            for (auto& env : environments)
+            {
+                if ((env.status == EnvironmentStatus::Running || env.status == EnvironmentStatus::Creating) && env.expiresAt <= now)
+                {
+                    std::cout << "[OrbitDaemon] Environment " << env.id << " expired. Triggering auto-teardown.\n";
+                    env.status = EnvironmentStatus::Destroying;
+                    env.logs.push_back("TTL expired. Automatic daemon cleanup initiated.");
+                    changesMade = true;
+
+                    auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+                        std::lock_guard<std::mutex> callbackLock(environmentsMutex);
+                        for (auto& e : environments)
+                        {
+                            if (e.id == id)
+                            {
+                                e.status = status;
+                                if (!logLine.empty())
+                                {
+                                    e.logs.push_back(logLine);
+                                }
+                                store.Save(environments);
+                                break;
+                            }
+                        }
+                    };
+
+                    Environment envCopy = env;
+                    std::thread([this, envCopy, onUpdate]() {
+                        orchestrator->Destroy(const_cast<Environment&>(envCopy), onUpdate);
+                    }).detach();
+                }
+            }
+
+            if (changesMade)
+            {
+                store.Save(environments);
+            }
+        }
+
+        std::this_thread::sleep_for(5s);
+    }
+}
+
+void OrbitDesktopApp::ExtendTtl()
+{
+    Terminal::Header("Extend TTL (+2 hours)");
+    int selected = SelectEnvironment("Select environment to extend TTL: ");
+    if (selected == 0) return;
+
+    std::lock_guard<std::mutex> lock(environmentsMutex);
+    Environment& env = environments[static_cast<std::size_t>(selected - 1)];
+    if (env.status != EnvironmentStatus::Running && env.status != EnvironmentStatus::Creating)
+    {
+        std::cout << "\nOnly active environments can have their TTL extended.\n";
+        Terminal::Pause();
+        return;
+    }
+
+    std::time_t newExpires = env.expiresAt + (2 * 60 * 60);
+    if (newExpires - env.createdAt > (48 * 60 * 60))
+    {
+        std::cout << "\nExtension denied. Capped maximum lifetime of 48 hours reached.\n";
+        Terminal::Pause();
+        return;
+    }
+
+    env.expiresAt = newExpires;
+    env.logs.push_back("TTL extended by 2 hours by " + session->username + ".");
+    store.Save(environments);
+    std::cout << "\nTTL extended successfully. New expiration: " << Terminal::FormatTime(env.expiresAt) << "\n";
+    Terminal::Pause();
 }

@@ -3,9 +3,57 @@
 #include "Terminal.h"
 #include <chrono>
 #include <thread>
+#include <iostream>
 
 using Clock = std::chrono::system_clock;
 using namespace std::chrono_literals;
+
+long long ParseLatestRunId(const std::string& json)
+{
+    size_t pos = json.find("\"id\":");
+    if (pos != std::string::npos)
+    {
+        size_t start = json.find_first_of("0123456789", pos);
+        if (start != std::string::npos)
+        {
+            size_t end = json.find_first_not_of("0123456789", start);
+            try {
+                return std::stoll(json.substr(start, end - start));
+            } catch(...) {}
+        }
+    }
+    return 0;
+}
+
+std::string ParseRunStatus(const std::string& json)
+{
+    size_t pos = json.find("\"status\":");
+    if (pos != std::string::npos)
+    {
+        size_t start = json.find("\"", pos + 9);
+        if (start != std::string::npos)
+        {
+            size_t end = json.find("\"", start + 1);
+            return json.substr(start + 1, end - start - 1);
+        }
+    }
+    return "";
+}
+
+std::string ParseRunConclusion(const std::string& json)
+{
+    size_t pos = json.find("\"conclusion\":");
+    if (pos != std::string::npos)
+    {
+        size_t start = json.find("\"", pos + 13);
+        if (start != std::string::npos)
+        {
+            size_t end = json.find("\"", start + 1);
+            return json.substr(start + 1, end - start - 1);
+        }
+    }
+    return "";
+}
 
 Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session, const Repository& repository, const std::string& branch, const EnvironmentTemplate& selectedTemplate, int ttlHours, std::function<void(const std::string& id, EnvironmentStatus status, const std::string& logLine)> onUpdate) const
 {
@@ -31,39 +79,120 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
     environment.databaseUser = "orbit_" + branchSlug;
     environment.databasePassword = "tmp_" + std::to_string(environmentSlug.size() * 7919);
 
-    const std::string initialLine = "[" + Terminal::ProgressBar(0) + "] 0%  Initializing provisioning sequence...";
-    environment.logs.push_back(initialLine);
-
     std::string envId = environment.id;
     std::string repo = environment.repository;
     std::string appUrl = environment.appUrl;
 
-    std::thread([envId, repo, branch, appUrl, onUpdate]() {
-        const std::vector<std::string> steps = {
-            "Validating token permissions and scopes",
-            "POST /repos/" + repo + "/dispatches",
-            "repository_dispatch event received by GitHub Actions",
-            "Clonando branch " + branch,
-            "Building Docker image",
-            "Running terraform plan",
-            "Running terraform apply",
-            "Creating isolated Kubernetes namespace",
-            "Provisioning temporary database",
-            "Applying Kubernetes manifests via kubectl apply",
-            "Waiting for deployment health checks",
-            "Publishing temporary application URL and credentials"
-        };
+    if (selectedTemplate.id == "local-k8s")
+    {
+        // Local Kubernetes simulation & actual namespace creation
+        std::thread([envId, branch, appUrl, onUpdate]() {
+            onUpdate(envId, EnvironmentStatus::Creating, "[kubectl] Verifying cluster accessibility...");
+            std::this_thread::sleep_for(200ms);
+            
+            std::string nsName = "preview-" + envId;
+            onUpdate(envId, EnvironmentStatus::Creating, "[kubectl] Creating isolated namespace: " + nsName);
+            TextUtil::ExecuteCommand("kubectl create namespace " + nsName + " --dry-run=client -o yaml | kubectl apply -f -");
+            std::this_thread::sleep_for(300ms);
 
-        for (std::size_t index = 0; index < steps.size(); ++index)
-        {
-            const int progress = static_cast<int>(((index + 1) * 100) / steps.size());
-            const std::string line = "[" + Terminal::ProgressBar(progress) + "] " + std::to_string(progress) + "%  " + steps[index] + "...";
-            onUpdate(envId, EnvironmentStatus::Creating, line);
-            std::this_thread::sleep_for(250ms);
-        }
+            onUpdate(envId, EnvironmentStatus::Creating, "[kubectl] Deploying application components...");
+            TextUtil::ExecuteCommand("kubectl create deployment express-app --image=node:22-alpine -n " + nsName + " --dry-run=client -o yaml | kubectl apply -f -");
+            std::this_thread::sleep_for(300ms);
 
-        onUpdate(envId, EnvironmentStatus::Running, "Environment online: " + appUrl);
-    }).detach();
+            onUpdate(envId, EnvironmentStatus::Creating, "[kubectl] Exposing service...");
+            TextUtil::ExecuteCommand("kubectl create service clusterip express-app --tcp=8080:8080 -n " + nsName + " --dry-run=client -o yaml | kubectl apply -f -");
+            
+            onUpdate(envId, EnvironmentStatus::Running, "Local Kubernetes environment successfully created. App: " + appUrl);
+        }).detach();
+    }
+    else if (!session.token.empty())
+    {
+        // Real GitHub repository dispatch & Actions Run monitoring
+        std::thread([envId, repo, branch, appUrl, session, ttlHours, onUpdate]() {
+            onUpdate(envId, EnvironmentStatus::Creating, "GitHub API: Sending repository_dispatch...");
+
+            std::string payload = "{\\\"event_type\\\": \\\"orbitdesktop.launch\\\", \\\"client_payload\\\": {\\\"branch\\\": \\\"" + branch + "\\\", \\\"environment_id\\\": \\\"" + envId + "\\\", \\\"ttl_hours\\\": \\\"" + std::to_string(ttlHours) + "\\\"}}";
+            std::string dispatchCmd = "curl -s -X POST -H \"Authorization: token " + session.token + "\" -H \"Accept: application/vnd.github.v3+json\" -H \"User-Agent: OrbitDesktop\" -d \"" + payload + "\" \"https://api.github.com/repos/" + repo + "/dispatches\"";
+            TextUtil::ExecuteCommand(dispatchCmd);
+
+            // Poll runs API for the launched run
+            std::this_thread::sleep_for(3s);
+            long long runId = 0;
+            std::string runsCmd = "curl -s -H \"Authorization: token " + session.token + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/repos/" + repo + "/actions/runs?event=repository_dispatch\"";
+            
+            for (int attempt = 0; attempt < 5; ++attempt)
+            {
+                std::string response = TextUtil::ExecuteCommand(runsCmd);
+                runId = ParseLatestRunId(response);
+                if (runId != 0) break;
+                onUpdate(envId, EnvironmentStatus::Creating, "GitHub API: Waiting for Actions run to spawn...");
+                std::this_thread::sleep_for(2s);
+            }
+
+            if (runId == 0)
+            {
+                onUpdate(envId, EnvironmentStatus::Failed, "GitHub Actions run failed to start. Check credentials.");
+                return;
+            }
+
+            onUpdate(envId, EnvironmentStatus::Creating, "GitHub Run ID detected: " + std::to_string(runId) + ". Streaming logs...");
+
+            std::string runDetailCmd = "curl -s -H \"Authorization: token " + session.token + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/repos/" + repo + "/actions/runs/" + std::to_string(runId) + "\"";
+            
+            while (true)
+            {
+                std::string runDetail = TextUtil::ExecuteCommand(runDetailCmd);
+                std::string statusStr = ParseRunStatus(runDetail);
+                std::string conclusionStr = ParseRunConclusion(runDetail);
+
+                onUpdate(envId, EnvironmentStatus::Creating, "GitHub Workflow status: " + statusStr + " (Conclusion: " + (conclusionStr.empty() ? "Pending" : conclusionStr) + ")");
+
+                if (statusStr == "completed")
+                {
+                    if (conclusionStr == "success")
+                    {
+                        onUpdate(envId, EnvironmentStatus::Running, "CI/CD finished successfully. App ready: " + appUrl);
+                    }
+                    else
+                    {
+                        onUpdate(envId, EnvironmentStatus::Failed, "CI/CD execution failed.");
+                    }
+                    break;
+                }
+                std::this_thread::sleep_for(4s);
+            }
+        }).detach();
+    }
+    else
+    {
+        // Simulated workflow fallback
+        std::thread([envId, repo, branch, appUrl, onUpdate]() {
+            const std::vector<std::string> steps = {
+                "Validating token permissions and scopes",
+                "POST /repos/" + repo + "/dispatches",
+                "repository_dispatch event received by GitHub Actions",
+                "Cloning branch " + branch,
+                "Building Docker image",
+                "Running terraform plan",
+                "Running terraform apply",
+                "Creating isolated Kubernetes namespace",
+                "Provisioning temporary database",
+                "Applying Kubernetes manifests via kubectl apply",
+                "Waiting for deployment health checks",
+                "Publishing temporary application URL and credentials"
+            };
+
+            for (std::size_t index = 0; index < steps.size(); ++index)
+            {
+                const int progress = static_cast<int>(((index + 1) * 100) / steps.size());
+                const std::string line = "[" + Terminal::ProgressBar(progress) + "] " + std::to_string(progress) + "%  " + steps[index] + "...";
+                onUpdate(envId, EnvironmentStatus::Creating, line);
+                std::this_thread::sleep_for(250ms);
+            }
+
+            onUpdate(envId, EnvironmentStatus::Running, "Environment online: " + appUrl);
+        }).detach();
+    }
 
     return environment;
 }
@@ -72,24 +201,41 @@ void SimulatedEnvironmentOrchestrator::Destroy(Environment& environment, std::fu
 {
     std::string envId = environment.id;
 
-    std::thread([envId, onUpdate]() {
-        const std::vector<std::string> steps = {
-            "Dispatching orbitdesktop.destroy event",
-            "Removing Kubernetes ingress and services",
-            "Terminating pods in isolated namespace",
-            "Teardown temporary database",
-            "Running terraform destroy",
-            "Deallocating cloud resources"
-        };
+    if (environment.templateName.find("Local") != std::string::npos)
+    {
+        std::thread([envId, onUpdate]() {
+            std::string nsName = "preview-" + envId;
+            onUpdate(envId, EnvironmentStatus::Destroying, "[kubectl] Deleting isolated deployment...");
+            TextUtil::ExecuteCommand("kubectl delete deployment express-app -n " + nsName + " --ignore-not-found");
+            std::this_thread::sleep_for(300ms);
 
-        for (std::size_t index = 0; index < steps.size(); ++index)
-        {
-            const int progress = static_cast<int>(((index + 1) * 100) / steps.size());
-            const std::string line = "[" + Terminal::ProgressBar(progress) + "] " + std::to_string(progress) + "%  " + steps[index] + "...";
-            onUpdate(envId, EnvironmentStatus::Destroying, line);
-            std::this_thread::sleep_for(250ms);
-        }
+            onUpdate(envId, EnvironmentStatus::Destroying, "[kubectl] Deleting namespace...");
+            TextUtil::ExecuteCommand("kubectl delete namespace " + nsName + " --ignore-not-found");
+            
+            onUpdate(envId, EnvironmentStatus::Destroyed, "Local Kubernetes namespace successfully cleaned.");
+        }).detach();
+    }
+    else
+    {
+        std::thread([envId, onUpdate]() {
+            const std::vector<std::string> steps = {
+                "Dispatching orbitdesktop.destroy event",
+                "Removing Kubernetes ingress and services",
+                "Terminating pods in isolated namespace",
+                "Teardown temporary database",
+                "Running terraform destroy",
+                "Deallocating cloud resources"
+            };
 
-        onUpdate(envId, EnvironmentStatus::Destroyed, "Environment successfully destroyed.");
-    }).detach();
+            for (std::size_t index = 0; index < steps.size(); ++index)
+            {
+                const int progress = static_cast<int>(((index + 1) * 100) / steps.size());
+                const std::string line = "[" + Terminal::ProgressBar(progress) + "] " + std::to_string(progress) + "%  " + steps[index] + "...";
+                onUpdate(envId, EnvironmentStatus::Destroying, line);
+                std::this_thread::sleep_for(250ms);
+            }
+
+            onUpdate(envId, EnvironmentStatus::Destroyed, "Environment successfully destroyed.");
+        }).detach();
+    }
 }

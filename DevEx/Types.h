@@ -42,6 +42,7 @@ struct UserSession
     std::string username;
     UserRole role = UserRole::Developer;
     std::string tokenPreview;
+    std::string token;
 };
 
 struct Environment

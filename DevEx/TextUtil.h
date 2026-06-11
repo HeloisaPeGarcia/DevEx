@@ -11,4 +11,5 @@ public:
     static std::string Join(const std::vector<std::string>& values, char delimiter);
     static std::vector<std::string> Split(const std::string& value, char delimiter);
     static std::string Trim(const std::string& str);
+    static std::string ExecuteCommand(const std::string& cmd);
 };
