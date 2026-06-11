@@ -59,7 +59,11 @@ std::string Terminal::FormatTime(std::time_t value)
     }
 
     std::tm localTime{};
+#if defined(_MSC_VER) || defined(__MINGW32__)
     localtime_s(&localTime, &value);
+#else
+    localtime_r(&value, &localTime);
+#endif
 
     std::ostringstream output;
     output << std::put_time(&localTime, "%Y-%m-%d %H:%M");

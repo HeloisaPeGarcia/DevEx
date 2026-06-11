@@ -71,3 +71,28 @@ std::string TextUtil::Trim(const std::string& str)
     const std::size_t last = str.find_last_not_of(" \t\r\n");
     return str.substr(first, last - first + 1);
 }
+
+std::string TextUtil::ExecuteCommand(const std::string& cmd)
+{
+    std::string result;
+    char buffer[128];
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
+    FILE* pipe = popen(cmd.c_str(), "r");
+#endif
+    if (!pipe)
+    {
+        return "";
+    }
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
+        result += buffer;
+    }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    return result;
+}

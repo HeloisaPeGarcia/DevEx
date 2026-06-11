@@ -15,6 +15,12 @@ class OrbitDesktopApp
 public:
     OrbitDesktopApp();
     void Run();
+    
+    // Headless / CLI execution methods
+    bool RunHeadlessLaunch(const std::string& repoPath, const std::string& branch, const std::string& templateId, int ttlHours);
+    bool RunHeadlessNuke(const std::string& envId);
+    void RunHeadlessList() const;
+    void RunDaemon();
 
 private:
     std::unique_ptr<IGitProvider> gitProvider;
@@ -43,4 +49,5 @@ private:
     int CountActiveEnvironments() const;
     double CurrentHourlyCost() const;
     static std::string RoleName(UserRole role);
+    void ExtendTtl();
 };
