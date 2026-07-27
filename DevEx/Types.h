@@ -43,6 +43,19 @@ struct UserSession
     UserRole role = UserRole::Developer;
     std::string tokenPreview;
     std::string token;
+
+    ~UserSession()
+    {
+        if (!token.empty())
+        {
+            // Securely erase token from memory
+            volatile char* p = const_cast<volatile char*>(token.data());
+            for (std::size_t i = 0; i < token.size(); ++i)
+            {
+                p[i] = 0;
+            }
+        }
+    }
 };
 
 struct Environment

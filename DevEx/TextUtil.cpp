@@ -96,3 +96,15 @@ std::string TextUtil::ExecuteCommand(const std::string& cmd)
 #endif
     return result;
 }
+
+std::string TextUtil::EscapeShellArg(const std::string& arg)
+{
+    std::string result = "\"";
+    for (char c : arg)
+    {
+        if (c == '"') result += "\\\"";
+        else result += c;
+    }
+    result += "\"";
+    return result;
+}

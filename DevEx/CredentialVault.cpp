@@ -7,23 +7,15 @@
 #pragma comment(lib, "Advapi32.lib")
 #endif
 
-UserSession CredentialVault::Authenticate(const std::string& personalAccessToken) const
+std::optional<UserSession> CredentialVault::Authenticate(const std::string& personalAccessToken) const
 {
     const std::string token = TextUtil::Trim(personalAccessToken);
     if (token.size() < 12)
     {
-        return {};
+        return std::nullopt;
     }
 
-    // Validate format for classic tokens (ghp_) or fine-grained tokens (github_pat_)
-    const bool hasValidFormat = (token.rfind("ghp_", 0) == 0) || 
-                                 (token.rfind("github_pat_", 0) == 0) || 
-                                 (token.size() >= 12);
-
-    if (!hasValidFormat)
-    {
-        return {};
-    }
+    // Accept any token with at least 12 characters for prototype purposes
 
     UserSession session;
     session.username = "octocat"; // Standard GitHub user representation

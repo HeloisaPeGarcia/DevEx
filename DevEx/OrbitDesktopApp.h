@@ -9,6 +9,7 @@
 #include <vector>
 #include <optional>
 #include <mutex>
+#include <future>
 
 class OrbitDesktopApp
 {
@@ -31,6 +32,7 @@ private:
     std::vector<Repository> repositories;
     std::vector<Environment> environments;
     mutable std::mutex environmentsMutex;
+    std::vector<std::future<void>> backgroundTasks;
 
     std::vector<EnvironmentTemplate> templates;
 
@@ -44,7 +46,7 @@ private:
     void ShowLogs() const;
     void NukeEnvironment();
     void ShowTemplates() const;
-    int SelectEnvironment(const std::string& label) const;
+    std::string SelectEnvironment(const std::string& label) const;
     void ExpireOldEnvironments();
     int CountActiveEnvironments() const;
     double CurrentHourlyCost() const;

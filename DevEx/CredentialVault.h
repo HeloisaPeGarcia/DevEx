@@ -2,9 +2,10 @@
 
 #include "Types.h"
 #include <string>
+#include <optional>
 
 class CredentialVault
 {
 public:
-    UserSession Authenticate(const std::string& personalAccessToken) const;
+    std::optional<UserSession> Authenticate(const std::string& personalAccessToken) const;
 };

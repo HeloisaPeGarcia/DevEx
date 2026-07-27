@@ -2,6 +2,48 @@
 #include "TextUtil.h"
 #include <fstream>
 #include <sstream>
+#include "json.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+using json = nlohmann::json;
+
+class ProcessFileLock
+{
+private:
+#ifdef _WIN32
+    HANDLE hLock = INVALID_HANDLE_VALUE;
+#endif
+public:
+    ProcessFileLock(const std::string& path)
+    {
+#ifdef _WIN32
+        std::wstring lockPath = std::wstring(path.begin(), path.end()) + L".lock";
+        int retries = 50; // Try for up to 5 seconds
+        while (retries-- > 0)
+        {
+            hLock = CreateFileW(lockPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, NULL);
+            if (hLock != INVALID_HANDLE_VALUE)
+            {
+                break;
+            }
+            Sleep(100);
+        }
+#endif
+    }
+
+    ~ProcessFileLock()
+    {
+#ifdef _WIN32
+        if (hLock != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(hLock);
+        }
+#endif
+    }
+};
 
 EnvironmentStore::EnvironmentStore(std::string filePath)
     : path(std::move(filePath))
@@ -10,6 +52,7 @@ EnvironmentStore::EnvironmentStore(std::string filePath)
 
 std::vector<Environment> EnvironmentStore::Load() const
 {
+    ProcessFileLock lock(path);
     std::ifstream input(path);
     std::vector<Environment> environments;
 
@@ -21,37 +64,33 @@ std::vector<Environment> EnvironmentStore::Load() const
     std::string line;
     while (std::getline(input, line))
     {
-        const std::vector<std::string> columns = TextUtil::Split(line, '\t');
-        if (columns.size() < 13)
-        {
-            continue;
+        if (line.empty()) continue;
+        try {
+            auto j = json::parse(line);
+            Environment environment;
+            environment.id = j.value("id", "");
+            environment.repository = j.value("repository", "");
+            environment.branch = j.value("branch", "");
+            environment.templateName = j.value("templateName", "");
+            environment.owner = j.value("owner", "");
+            environment.status = ParseStatus(j.value("status", "Creating"));
+            environment.createdAt = static_cast<std::time_t>(j.value("createdAt", 0LL));
+            environment.expiresAt = static_cast<std::time_t>(j.value("expiresAt", 0LL));
+            environment.hourlyCostUsd = j.value("hourlyCostUsd", 0.0);
+            environment.workflowRunUrl = j.value("workflowRunUrl", "");
+            environment.appUrl = j.value("appUrl", "");
+            environment.databaseHost = j.value("databaseHost", "");
+            environment.databaseUser = j.value("databaseUser", "");
+            environment.databasePassword = j.value("databasePassword", "");
+            if (j.contains("logs") && j["logs"].is_array()) {
+                environment.logs = j["logs"].get<std::vector<std::string>>();
+            }
+            if (!environment.id.empty()) {
+                environments.push_back(environment);
+            }
+        } catch (...) {
+            continue; // Skip malformed lines
         }
-
-        Environment environment;
-        environment.id = columns[0];
-        environment.repository = columns[1];
-        environment.branch = columns[2];
-        environment.templateName = columns[3];
-        environment.owner = columns[4];
-        environment.status = ParseStatus(columns[5]);
-        try
-        {
-            environment.createdAt = static_cast<std::time_t>(std::stoll(columns[6]));
-            environment.expiresAt = static_cast<std::time_t>(std::stoll(columns[7]));
-            environment.hourlyCostUsd = std::stod(columns[8]);
-        }
-        catch (const std::exception&)
-        {
-            continue; // Skip malformed environments
-        }
-        environment.workflowRunUrl = columns[9];
-        environment.appUrl = columns[10];
-        environment.databaseHost = columns[11];
-        environment.databaseUser = columns[12];
-        environment.databasePassword = columns.size() > 13 ? columns[13] : "";
-        environment.logs = columns.size() > 14 ? TextUtil::Split(columns[14], '|') : std::vector<std::string>{};
-
-        environments.push_back(environment);
     }
 
     return environments;
@@ -59,25 +98,29 @@ std::vector<Environment> EnvironmentStore::Load() const
 
 void EnvironmentStore::Save(const std::vector<Environment>& environments) const
 {
+    ProcessFileLock lock(path);
     std::ofstream output(path, std::ios::trunc);
 
     for (const Environment& environment : environments)
     {
-        output << environment.id << '\t'
-               << environment.repository << '\t'
-               << environment.branch << '\t'
-               << environment.templateName << '\t'
-               << environment.owner << '\t'
-               << StatusName(environment.status) << '\t'
-               << environment.createdAt << '\t'
-               << environment.expiresAt << '\t'
-               << environment.hourlyCostUsd << '\t'
-               << environment.workflowRunUrl << '\t'
-               << environment.appUrl << '\t'
-               << environment.databaseHost << '\t'
-               << environment.databaseUser << '\t'
-               << environment.databasePassword << '\t'
-               << TextUtil::Join(environment.logs, '|') << '\n';
+        json j;
+        j["id"] = environment.id;
+        j["repository"] = environment.repository;
+        j["branch"] = environment.branch;
+        j["templateName"] = environment.templateName;
+        j["owner"] = environment.owner;
+        j["status"] = StatusName(environment.status);
+        j["createdAt"] = static_cast<long long>(environment.createdAt);
+        j["expiresAt"] = static_cast<long long>(environment.expiresAt);
+        j["hourlyCostUsd"] = environment.hourlyCostUsd;
+        j["workflowRunUrl"] = environment.workflowRunUrl;
+        j["appUrl"] = environment.appUrl;
+        j["databaseHost"] = environment.databaseHost;
+        j["databaseUser"] = environment.databaseUser;
+        j["databasePassword"] = environment.databasePassword;
+        j["logs"] = environment.logs;
+
+        output << j.dump() << '\n';
     }
 }
 

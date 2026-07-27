@@ -95,11 +95,11 @@ bool OrbitDesktopApp::Login()
     for (int attempt = 1; attempt <= 3; ++attempt)
     {
         const std::string token = Terminal::ReadLine("Enter your GitHub/GitLab Personal Access Token: ");
-        UserSession authenticated = credentialVault.Authenticate(token);
+        auto authenticated = credentialVault.Authenticate(token);
 
-        if (!authenticated.username.empty())
+        if (authenticated)
         {
-            session = authenticated;
+            session = *authenticated;
             std::cout << "\nToken accepted. In production, credentials will be stored securely via Windows Credential Manager.\n";
             std::this_thread::sleep_for(700ms);
             return true;
@@ -222,28 +222,35 @@ void OrbitDesktopApp::SelectBranchAndLaunch(const Repository& repository)
 
 EnvironmentTemplate OrbitDesktopApp::SelectTemplate() const
 {
-    std::cout << "\nInfrastructure Templates:\n";
-    for (std::size_t index = 0; index < templates.size(); ++index)
+    std::vector<EnvironmentTemplate> availableTemplates;
+    for (const auto& tpl : templates)
     {
-        std::cout << index + 1 << ". " << templates[index].name
-                  << " | US$ " << std::fixed << std::setprecision(2) << templates[index].hourlyCostUsd << "/h";
+        if (tpl.requiresAdmin && session->role != UserRole::Admin) continue;
+        availableTemplates.push_back(tpl);
+    }
 
-        if (templates[index].requiresAdmin)
-        {
-            std::cout << " [Requires Admin]";
-        }
+    if (availableTemplates.empty())
+    {
+        std::cout << "No templates available for your role.\n";
+        Terminal::Pause();
+        return {};
+    }
 
-        std::cout << "\n";
+    std::cout << "\nInfrastructure Templates:\n";
+    for (std::size_t index = 0; index < availableTemplates.size(); ++index)
+    {
+        std::cout << index + 1 << ". " << availableTemplates[index].name
+                  << " | US$ " << std::fixed << std::setprecision(2) << availableTemplates[index].hourlyCostUsd << "/h\n";
     }
     std::cout << "0. Back\n\n";
 
-    const int selected = Terminal::ReadOption("Select template: ", 0, static_cast<int>(templates.size()));
+    const int selected = Terminal::ReadOption("Select template: ", 0, static_cast<int>(availableTemplates.size()));
     if (selected == 0)
     {
         return {};
     }
 
-    return templates[static_cast<std::size_t>(selected - 1)];
+    return availableTemplates[static_cast<std::size_t>(selected - 1)];
 }
 
 int OrbitDesktopApp::SelectTtlHours()
@@ -334,8 +341,18 @@ void OrbitDesktopApp::ShowDashboard() const
                   << " | Repo: " << environment.repository
                   << " | Branch: " << environment.branch << "\n";
         std::cout << "   Template:  " << environment.templateName
-                  << " | Expires: " << Terminal::FormatTime(environment.expiresAt)
-                  << " | Cost: US$ " << std::fixed << std::setprecision(2) << environment.hourlyCostUsd << "/h\n";
+                  << " | Expires: " << Terminal::FormatTime(environment.expiresAt);
+        
+        std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        if (environment.expiresAt > now) {
+            long long diff = environment.expiresAt - now;
+            std::cout << " (" << (diff / 3600) << "h " << ((diff % 3600) / 60) << "m remaining)";
+        } else {
+            std::cout << " (Expired)";
+        }
+
+        double maxMonthlyCost = environment.hourlyCostUsd * 24 * 30;
+        std::cout << " | Cost: US$ " << std::fixed << std::setprecision(2) << environment.hourlyCostUsd << "/h (Max Monthly: US$ " << maxMonthlyCost << ")\n";
 
         if (environment.status == EnvironmentStatus::Running)
         {
@@ -353,23 +370,32 @@ void OrbitDesktopApp::ShowLogs() const
 {
     Terminal::Header("Environment Logs");
 
-    const int selected = SelectEnvironment("Select environment to view logs: ");
-    if (selected == 0)
+    const std::string selectedId = SelectEnvironment("Enter environment ID to view logs (or 0 to go back): ");
+    if (selectedId == "0" || selectedId.empty())
     {
         return;
     }
 
     Environment environment;
+    bool found = false;
     {
         std::lock_guard<std::mutex> lock(environmentsMutex);
-        if (static_cast<std::size_t>(selected - 1) < environments.size())
+        for (const auto& env : environments)
         {
-            environment = environments[static_cast<std::size_t>(selected - 1)];
+            if (env.id == selectedId)
+            {
+                environment = env;
+                found = true;
+                break;
+            }
         }
-        else
-        {
-            return;
-        }
+    }
+
+    if (!found)
+    {
+        std::cout << "Environment not found.\n";
+        Terminal::Pause();
+        return;
     }
 
     std::cout << "\nEnvironment ID: " << environment.id << "\n";
@@ -387,8 +413,8 @@ void OrbitDesktopApp::NukeEnvironment()
 {
     Terminal::Header("Nuke Environment");
 
-    const int selected = SelectEnvironment("Select environment to destroy: ");
-    if (selected == 0)
+    const std::string selectedId = SelectEnvironment("Enter environment ID to destroy (or 0 to go back): ");
+    if (selectedId == "0" || selectedId.empty())
     {
         return;
     }
@@ -397,20 +423,28 @@ void OrbitDesktopApp::NukeEnvironment()
     std::string envId;
     {
         std::lock_guard<std::mutex> lock(environmentsMutex);
-        if (static_cast<std::size_t>(selected - 1) < environments.size())
+        bool found = false;
+        for (const auto& env : environments)
         {
-            const Environment& environment = environments[static_cast<std::size_t>(selected - 1)];
-            if (environment.status == EnvironmentStatus::Destroyed || environment.status == EnvironmentStatus::Expired)
+            if (env.id == selectedId)
             {
-                alreadyFinalized = true;
-            }
-            else
-            {
-                envId = environment.id;
+                found = true;
+                if (env.status == EnvironmentStatus::Destroyed || env.status == EnvironmentStatus::Expired)
+                {
+                    alreadyFinalized = true;
+                }
+                else
+                {
+                    envId = env.id;
+                }
+                break;
             }
         }
-        else
+        
+        if (!found)
         {
+            std::cout << "Environment not found.\n";
+            Terminal::Pause();
             return;
         }
     }
@@ -432,6 +466,9 @@ void OrbitDesktopApp::NukeEnvironment()
         return;
     }
 
+    bool found = false;
+    Environment envCopy;
+
     {
         std::lock_guard<std::mutex> lock(environmentsMutex);
         for (auto& env : environments)
@@ -440,32 +477,33 @@ void OrbitDesktopApp::NukeEnvironment()
             {
                 env.status = EnvironmentStatus::Destroying;
                 store.Save(environments);
-
-                auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
-                    std::lock_guard<std::mutex> callbackLock(environmentsMutex);
-                    for (auto& e : environments)
-                    {
-                        if (e.id == id)
-                        {
-                            e.status = status;
-                            if (!logLine.empty())
-                            {
-                                e.logs.push_back(logLine);
-                            }
-                            store.Save(environments);
-                            break;
-                        }
-                    }
-                };
-
-                Environment envCopy = env;
-                std::thread([this, envCopy, onUpdate]() {
-                    orchestrator->Destroy(const_cast<Environment&>(envCopy), onUpdate);
-                }).detach();
-
+                envCopy = env;
+                found = true;
                 break;
             }
         }
+    }
+
+    if (found)
+    {
+        auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+            std::lock_guard<std::mutex> callbackLock(environmentsMutex);
+            for (auto& e : environments)
+            {
+                if (e.id == id)
+                {
+                    e.status = status;
+                    if (!logLine.empty())
+                    {
+                        e.logs.push_back(logLine);
+                    }
+                    store.Save(environments);
+                    break;
+                }
+            }
+        };
+
+        orchestrator->Destroy(envCopy, onUpdate);
     }
 
     std::cout << "\nTeardown process dispatched in the background.\n";
@@ -478,17 +516,18 @@ void OrbitDesktopApp::ShowTemplates() const
 
     for (const EnvironmentTemplate& selectedTemplate : templates)
     {
+        if (selectedTemplate.requiresAdmin && session->role != UserRole::Admin) continue;
+
         std::cout << selectedTemplate.name << "\n";
         std::cout << "  ID:       " << selectedTemplate.id << "\n";
         std::cout << "  Usage:    " << selectedTemplate.description << "\n";
-        std::cout << "  Cost:     US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd << "/h\n";
-        std::cout << "  Requires: " << (selectedTemplate.requiresAdmin ? "Admin Access" : "Developer (or higher)") << "\n\n";
+        std::cout << "  Cost:     US$ " << std::fixed << std::setprecision(2) << selectedTemplate.hourlyCostUsd << "/h\n\n";
     }
 
     Terminal::Pause();
 }
 
-int OrbitDesktopApp::SelectEnvironment(const std::string& label) const
+std::string OrbitDesktopApp::SelectEnvironment(const std::string& label) const
 {
     std::vector<Environment> envsCopy;
     {
@@ -500,20 +539,20 @@ int OrbitDesktopApp::SelectEnvironment(const std::string& label) const
     {
         std::cout << "No active environments found.\n";
         Terminal::Pause();
-        return 0;
+        return "0";
     }
 
     for (std::size_t index = 0; index < envsCopy.size(); ++index)
     {
         const Environment& environment = envsCopy[index];
-        std::cout << index + 1 << ". " << environment.id
+        std::cout << "- " << environment.id
                   << " | " << EnvironmentStore::StatusName(environment.status)
                   << " | " << environment.repository
                   << " | " << environment.branch << "\n";
     }
     std::cout << "0. Back\n\n";
 
-    return Terminal::ReadOption(label, 0, static_cast<int>(envsCopy.size()));
+    return TextUtil::Trim(Terminal::ReadLine(label));
 }
 
 void OrbitDesktopApp::ExpireOldEnvironments()
@@ -700,48 +739,56 @@ bool OrbitDesktopApp::RunHeadlessNuke(const std::string& envId)
 
     environments = store.Load();
 
-    std::lock_guard<std::mutex> lock(environmentsMutex);
-    for (auto& env : environments)
+    Environment envCopy;
+    bool found = false;
+
     {
-        if (env.id == envId)
+        std::lock_guard<std::mutex> lock(environmentsMutex);
+        for (auto& env : environments)
         {
-            if (env.status == EnvironmentStatus::Destroyed || env.status == EnvironmentStatus::Expired)
+            if (env.id == envId)
             {
-                std::cerr << "{\"error\": \"Environment already terminated.\"}\n";
-                return false;
-            }
-
-            env.status = EnvironmentStatus::Destroying;
-            store.Save(environments);
-
-            auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
-                std::lock_guard<std::mutex> callbackLock(environmentsMutex);
-                for (auto& e : environments)
+                if (env.status == EnvironmentStatus::Destroyed || env.status == EnvironmentStatus::Expired)
                 {
-                    if (e.id == id)
-                    {
-                        e.status = status;
-                        if (!logLine.empty())
-                        {
-                            e.logs.push_back(logLine);
-                        }
-                        store.Save(environments);
-                        break;
-                    }
+                    std::cerr << "{\"error\": \"Environment already terminated.\"}\n";
+                    return false;
                 }
-            };
 
-            Environment envCopy = env;
-            std::thread([this, envCopy, onUpdate]() {
-                orchestrator->Destroy(const_cast<Environment&>(envCopy), onUpdate);
-            }).detach();
-
-            std::cout << "{\n"
-                      << "  \"id\": \"" << envId << "\",\n"
-                      << "  \"status\": \"Destroying\"\n"
-                      << "}\n";
-            return true;
+                env.status = EnvironmentStatus::Destroying;
+                store.Save(environments);
+                envCopy = env;
+                found = true;
+                break;
+            }
         }
+    }
+
+    if (found)
+    {
+        auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+            std::lock_guard<std::mutex> callbackLock(environmentsMutex);
+            for (auto& e : environments)
+            {
+                if (e.id == id)
+                {
+                    e.status = status;
+                    if (!logLine.empty())
+                    {
+                        e.logs.push_back(logLine);
+                    }
+                    store.Save(environments);
+                    break;
+                }
+            }
+        };
+
+        orchestrator->Destroy(envCopy, onUpdate);
+
+        std::cout << "{\n"
+                  << "  \"id\": \"" << envId << "\",\n"
+                  << "  \"status\": \"Destroying\"\n"
+                  << "}\n";
+        return true;
     }
 
     std::cerr << "{\"error\": \"Environment not found: " << envId << "\"}\n";
@@ -772,11 +819,35 @@ void OrbitDesktopApp::RunDaemon()
     std::cout << "[OrbitDaemon] Initializing headless daemon service...\n";
     std::cout << "[OrbitDaemon] Monitoring active environments for automatic TTL expiration...\n";
 
+    int backoffSeconds = 5;
+
     while (true)
     {
-        environments = store.Load();
+        try
+        {
+            auto loadedEnvs = store.Load();
+            std::lock_guard<std::mutex> lock(environmentsMutex);
+            environments = loadedEnvs;
+            backoffSeconds = 5;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[OrbitDaemon] Failed to read database: " << e.what() << ". Retrying in " << backoffSeconds << "s...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(backoffSeconds));
+            backoffSeconds = std::min(60, backoffSeconds * 2);
+            continue;
+        }
+        catch (...)
+        {
+            std::cerr << "[OrbitDaemon] Unknown error reading database. Retrying in " << backoffSeconds << "s...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(backoffSeconds));
+            backoffSeconds = std::min(60, backoffSeconds * 2);
+            continue;
+        }
+
         const std::time_t now = Clock::to_time_t(Clock::now());
         bool changesMade = false;
+        std::vector<Environment> environmentsToDestroy;
 
         {
             std::lock_guard<std::mutex> lock(environmentsMutex);
@@ -788,28 +859,7 @@ void OrbitDesktopApp::RunDaemon()
                     env.status = EnvironmentStatus::Destroying;
                     env.logs.push_back("TTL expired. Automatic daemon cleanup initiated.");
                     changesMade = true;
-
-                    auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
-                        std::lock_guard<std::mutex> callbackLock(environmentsMutex);
-                        for (auto& e : environments)
-                        {
-                            if (e.id == id)
-                            {
-                                e.status = status;
-                                if (!logLine.empty())
-                                {
-                                    e.logs.push_back(logLine);
-                                }
-                                store.Save(environments);
-                                break;
-                            }
-                        }
-                    };
-
-                    Environment envCopy = env;
-                    std::thread([this, envCopy, onUpdate]() {
-                        orchestrator->Destroy(const_cast<Environment&>(envCopy), onUpdate);
-                    }).detach();
+                    environmentsToDestroy.push_back(env);
                 }
             }
 
@@ -819,6 +869,27 @@ void OrbitDesktopApp::RunDaemon()
             }
         }
 
+        for (const auto& envToDestroy : environmentsToDestroy)
+        {
+            auto onUpdate = [this](const std::string& id, EnvironmentStatus status, const std::string& logLine) {
+                std::lock_guard<std::mutex> callbackLock(environmentsMutex);
+                for (auto& e : environments)
+                {
+                    if (e.id == id)
+                    {
+                        e.status = status;
+                        if (!logLine.empty())
+                        {
+                            e.logs.push_back(logLine);
+                        }
+                        store.Save(environments);
+                        break;
+                    }
+                }
+            };
+            orchestrator->Destroy(envToDestroy, onUpdate);
+        }
+
         std::this_thread::sleep_for(5s);
     }
 }
@@ -826,29 +897,42 @@ void OrbitDesktopApp::RunDaemon()
 void OrbitDesktopApp::ExtendTtl()
 {
     Terminal::Header("Extend TTL (+2 hours)");
-    int selected = SelectEnvironment("Select environment to extend TTL: ");
-    if (selected == 0) return;
+    const std::string selectedId = SelectEnvironment("Enter environment ID to extend TTL (or 0 to go back): ");
+    if (selectedId == "0" || selectedId.empty()) return;
 
     std::lock_guard<std::mutex> lock(environmentsMutex);
-    Environment& env = environments[static_cast<std::size_t>(selected - 1)];
-    if (env.status != EnvironmentStatus::Running && env.status != EnvironmentStatus::Creating)
+    bool found = false;
+    for (auto& env : environments)
     {
-        std::cout << "\nOnly active environments can have their TTL extended.\n";
-        Terminal::Pause();
-        return;
-    }
+        if (env.id == selectedId)
+        {
+            found = true;
+            if (env.status != EnvironmentStatus::Running && env.status != EnvironmentStatus::Creating)
+            {
+                std::cout << "\nOnly active environments can have their TTL extended.\n";
+                Terminal::Pause();
+                return;
+            }
 
-    std::time_t newExpires = env.expiresAt + (2 * 60 * 60);
-    if (newExpires - env.createdAt > (48 * 60 * 60))
+            std::time_t newExpires = env.expiresAt + (2 * 60 * 60);
+            if (newExpires - env.createdAt > (48 * 60 * 60))
+            {
+                std::cout << "\nMaximum total TTL (48 hours) reached. Cannot extend further.\n";
+                Terminal::Pause();
+                return;
+            }
+
+            env.expiresAt = newExpires;
+            store.Save(environments);
+            std::cout << "\nTTL extended successfully. New expiration: " << Terminal::FormatTime(env.expiresAt) << "\n";
+            Terminal::Pause();
+            break;
+        }
+    }
+    
+    if (!found)
     {
-        std::cout << "\nExtension denied. Capped maximum lifetime of 48 hours reached.\n";
+        std::cout << "Environment not found.\n";
         Terminal::Pause();
-        return;
     }
-
-    env.expiresAt = newExpires;
-    env.logs.push_back("TTL extended by 2 hours by " + session->username + ".");
-    store.Save(environments);
-    std::cout << "\nTTL extended successfully. New expiration: " << Terminal::FormatTime(env.expiresAt) << "\n";
-    Terminal::Pause();
 }

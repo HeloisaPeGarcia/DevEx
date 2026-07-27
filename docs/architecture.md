@@ -37,6 +37,12 @@ flowchart TB
     Actions --> Cluster
 ```
 
+## Workstation Architecture & Runtime Details
+
+- **Local Storage Engine**: The local environment configuration and logs are persisted inside a robust **JSON Lines** flat-file store (`EnvironmentStore`), which natively supports nested values, avoiding structural errors or parser failures typical of CSV/TSV format when parsing dynamic multiline logs.
+- **Asynchronous Execution (Non-blocking UI)**: The workstation UI delegates heavy execution tasks (such as curl API polling and local shell processes) to background tasks using `std::async(std::launch::async)`. These tasks are lifetime-managed within the host application via `std::future` tracking to eliminate resource leaks (use-after-free) or detached thread dangling.
+- **Mutex Isolation**: Critical resources, particularly the list of active environments, are protected by a dedicated mutex (`environmentsMutex`). Locks are released prior to dispatching background tasks to prevent callback recursion deadlocks.
+
 ## Production Flow
 
 1. OrbitDesktop authenticates the developer through OAuth or a GitHub App flow.

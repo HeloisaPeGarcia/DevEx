@@ -1,6 +1,7 @@
 #include "CostEstimator.h"
 #include <fstream>
 #include <sstream>
+#include "json.hpp"
 
 double CostEstimator::GetMonthlyCostEstimate(const std::string& reportPath)
 {
@@ -9,20 +10,18 @@ double CostEstimator::GetMonthlyCostEstimate(const std::string& reportPath)
     {
         return -1.0;
     }
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    size_t pos = content.find("\"totalMonthlyCost\":");
-    if (pos != std::string::npos)
+    
+    try
     {
-        size_t start = content.find_first_of("0123456789", pos);
-        if (start != std::string::npos)
+        nlohmann::json j;
+        file >> j;
+        if (j.contains("totalMonthlyCost"))
         {
-            size_t end = content.find_first_not_of("0123456789.", start);
-            try
-            {
-                return std::stod(content.substr(start, end - start));
-            }
-            catch(...) {}
+            std::string costStr = j["totalMonthlyCost"].get<std::string>();
+            return std::stod(costStr);
         }
     }
+    catch (...) {}
+
     return -1.0;
 }

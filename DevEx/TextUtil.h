@@ -12,4 +12,5 @@ public:
     static std::vector<std::string> Split(const std::string& value, char delimiter);
     static std::string Trim(const std::string& str);
     static std::string ExecuteCommand(const std::string& cmd);
+    static std::string EscapeShellArg(const std::string& arg);
 };

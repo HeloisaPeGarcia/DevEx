@@ -4,54 +4,42 @@
 #include <chrono>
 #include <thread>
 #include <iostream>
+#include <random>
 
 using Clock = std::chrono::system_clock;
 using namespace std::chrono_literals;
 
-long long ParseLatestRunId(const std::string& json)
+#include "json.hpp"
+using json = nlohmann::json;
+
+long long ParseLatestRunId(const std::string& jsonStr)
 {
-    size_t pos = json.find("\"id\":");
-    if (pos != std::string::npos)
-    {
-        size_t start = json.find_first_of("0123456789", pos);
-        if (start != std::string::npos)
-        {
-            size_t end = json.find_first_not_of("0123456789", start);
-            try {
-                return std::stoll(json.substr(start, end - start));
-            } catch(...) {}
+    try {
+        auto j = json::parse(jsonStr);
+        if (j.contains("workflow_runs") && j["workflow_runs"].is_array() && !j["workflow_runs"].empty()) {
+            return j["workflow_runs"][0].value("id", 0LL);
         }
-    }
+    } catch (...) {}
     return 0;
 }
 
-std::string ParseRunStatus(const std::string& json)
+std::string ParseRunStatus(const std::string& jsonStr)
 {
-    size_t pos = json.find("\"status\":");
-    if (pos != std::string::npos)
-    {
-        size_t start = json.find("\"", pos + 9);
-        if (start != std::string::npos)
-        {
-            size_t end = json.find("\"", start + 1);
-            return json.substr(start + 1, end - start - 1);
-        }
-    }
+    try {
+        auto j = json::parse(jsonStr);
+        return j.value("status", "");
+    } catch (...) {}
     return "";
 }
 
-std::string ParseRunConclusion(const std::string& json)
+std::string ParseRunConclusion(const std::string& jsonStr)
 {
-    size_t pos = json.find("\"conclusion\":");
-    if (pos != std::string::npos)
-    {
-        size_t start = json.find("\"", pos + 13);
-        if (start != std::string::npos)
-        {
-            size_t end = json.find("\"", start + 1);
-            return json.substr(start + 1, end - start - 1);
+    try {
+        auto j = json::parse(jsonStr);
+        if (j["conclusion"].is_string()) {
+            return j["conclusion"].get<std::string>();
         }
-    }
+    } catch (...) {}
     return "";
 }
 
@@ -77,7 +65,11 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
     environment.appUrl = "https://" + environmentSlug + ".preview.orbitdesktop.local";
     environment.databaseHost = environmentSlug + ".db.preview.orbitdesktop.local:5432";
     environment.databaseUser = "orbit_" + branchSlug;
-    environment.databasePassword = "tmp_" + std::to_string(environmentSlug.size() * 7919);
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dist(10000000, 99999999);
+    environment.databasePassword = "tmp_" + std::to_string(dist(gen));
 
     std::string envId = environment.id;
     std::string repo = environment.repository;
@@ -86,7 +78,7 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
     if (selectedTemplate.id == "local-k8s")
     {
         // Local Kubernetes simulation & actual namespace creation
-        std::thread([envId, branch, appUrl, onUpdate]() {
+        backgroundTasks.push_back(std::async(std::launch::async, [envId, branch, appUrl, onUpdate]() {
             onUpdate(envId, EnvironmentStatus::Creating, "[kubectl] Verifying cluster accessibility...");
             std::this_thread::sleep_for(200ms);
             
@@ -103,12 +95,12 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
             TextUtil::ExecuteCommand("kubectl create service clusterip express-app --tcp=8080:8080 -n " + nsName + " --dry-run=client -o yaml | kubectl apply -f -");
             
             onUpdate(envId, EnvironmentStatus::Running, "Local Kubernetes environment successfully created. App: " + appUrl);
-        }).detach();
+        }));
     }
     else if (!session.token.empty())
     {
         // Real GitHub repository dispatch & Actions Run monitoring
-        std::thread([envId, repo, branch, appUrl, session, ttlHours, onUpdate]() {
+        backgroundTasks.push_back(std::async(std::launch::async, [envId, repo, branch, appUrl, session, ttlHours, onUpdate]() {
             onUpdate(envId, EnvironmentStatus::Creating, "GitHub API: Sending repository_dispatch...");
 
             std::string payload = "{\\\"event_type\\\": \\\"orbitdesktop.launch\\\", \\\"client_payload\\\": {\\\"branch\\\": \\\"" + branch + "\\\", \\\"environment_id\\\": \\\"" + envId + "\\\", \\\"ttl_hours\\\": \\\"" + std::to_string(ttlHours) + "\\\"}}";
@@ -161,12 +153,12 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
                 }
                 std::this_thread::sleep_for(4s);
             }
-        }).detach();
+        }));
     }
     else
     {
         // Simulated workflow fallback
-        std::thread([envId, repo, branch, appUrl, onUpdate]() {
+        backgroundTasks.push_back(std::async(std::launch::async, [envId, repo, branch, appUrl, onUpdate]() {
             const std::vector<std::string> steps = {
                 "Validating token permissions and scopes",
                 "POST /repos/" + repo + "/dispatches",
@@ -191,19 +183,19 @@ Environment SimulatedEnvironmentOrchestrator::Launch(const UserSession& session,
             }
 
             onUpdate(envId, EnvironmentStatus::Running, "Environment online: " + appUrl);
-        }).detach();
+        }));
     }
 
     return environment;
 }
 
-void SimulatedEnvironmentOrchestrator::Destroy(Environment& environment, std::function<void(const std::string& id, EnvironmentStatus status, const std::string& logLine)> onUpdate) const
+void SimulatedEnvironmentOrchestrator::Destroy(const Environment& environment, std::function<void(const std::string& id, EnvironmentStatus status, const std::string& logLine)> onUpdate) const
 {
     std::string envId = environment.id;
 
     if (environment.templateName.find("Local") != std::string::npos)
     {
-        std::thread([envId, onUpdate]() {
+        backgroundTasks.push_back(std::async(std::launch::async, [envId, onUpdate]() {
             std::string nsName = "preview-" + envId;
             onUpdate(envId, EnvironmentStatus::Destroying, "[kubectl] Deleting isolated deployment...");
             TextUtil::ExecuteCommand("kubectl delete deployment express-app -n " + nsName + " --ignore-not-found");
@@ -213,11 +205,11 @@ void SimulatedEnvironmentOrchestrator::Destroy(Environment& environment, std::fu
             TextUtil::ExecuteCommand("kubectl delete namespace " + nsName + " --ignore-not-found");
             
             onUpdate(envId, EnvironmentStatus::Destroyed, "Local Kubernetes namespace successfully cleaned.");
-        }).detach();
+        }));
     }
     else
     {
-        std::thread([envId, onUpdate]() {
+        backgroundTasks.push_back(std::async(std::launch::async, [envId, onUpdate]() {
             const std::vector<std::string> steps = {
                 "Dispatching orbitdesktop.destroy event",
                 "Removing Kubernetes ingress and services",
@@ -236,6 +228,6 @@ void SimulatedEnvironmentOrchestrator::Destroy(Environment& environment, std::fu
             }
 
             onUpdate(envId, EnvironmentStatus::Destroyed, "Environment successfully destroyed.");
-        }).detach();
+        }));
     }
 }

@@ -3,57 +3,38 @@
 #include <algorithm>
 #include <iostream>
 
-std::vector<Repository> ParseRepositories(const std::string& json)
+#include "json.hpp"
+using json = nlohmann::json;
+
+std::vector<Repository> ParseRepositories(const std::string& jsonStr)
 {
     std::vector<Repository> repos;
-    size_t pos = 0;
-    while (true)
-    {
-        pos = json.find("\"full_name\":", pos);
-        if (pos == std::string::npos) break;
-
-        pos = json.find("\"", pos + 12);
-        if (pos == std::string::npos) break;
-
-        size_t endPos = json.find("\"", pos + 1);
-        if (endPos == std::string::npos) break;
-
-        std::string fullName = json.substr(pos + 1, endPos - pos - 1);
-        size_t slash = fullName.find('/');
-        if (slash != std::string::npos)
-        {
+    try {
+        auto j = json::parse(jsonStr);
+        for (const auto& item : j) {
             Repository repo;
-            repo.owner = fullName.substr(0, slash);
-            repo.name = fullName.substr(slash + 1);
-            repos.push_back(repo);
+            repo.owner = item.value("owner", json::object()).value("login", "");
+            repo.name = item.value("name", "");
+            if (!repo.owner.empty() && !repo.name.empty()) {
+                repos.push_back(repo);
+            }
         }
-        pos = endPos;
-    }
+    } catch (...) {}
     return repos;
 }
 
-std::vector<std::string> ParseBranches(const std::string& json)
+std::vector<std::string> ParseBranches(const std::string& jsonStr)
 {
     std::vector<std::string> branches;
-    size_t pos = 0;
-    while (true)
-    {
-        pos = json.find("\"name\":", pos);
-        if (pos == std::string::npos) break;
-
-        pos = json.find("\"", pos + 7);
-        if (pos == std::string::npos) break;
-
-        size_t endPos = json.find("\"", pos + 1);
-        if (endPos == std::string::npos) break;
-
-        std::string branch = json.substr(pos + 1, endPos - pos - 1);
-        if (std::find(branches.begin(), branches.end(), branch) == branches.end())
-        {
-            branches.push_back(branch);
+    try {
+        auto j = json::parse(jsonStr);
+        for (const auto& item : j) {
+            std::string branch = item.value("name", "");
+            if (!branch.empty() && std::find(branches.begin(), branches.end(), branch) == branches.end()) {
+                branches.push_back(branch);
+            }
         }
-        pos = endPos;
-    }
+    } catch (...) {}
     return branches;
 }
 
@@ -62,7 +43,7 @@ std::vector<Repository> SimulatedGitProvider::FetchRepositories(const UserSessio
     // Try real API call first
     if (!session.token.empty())
     {
-        std::string cmd = "curl -s -H \"Authorization: token " + session.token + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/user/repos\"";
+        std::string cmd = "curl -s -H \"Authorization: token " + TextUtil::EscapeShellArg(session.token) + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/user/repos\"";
         std::string response = TextUtil::ExecuteCommand(cmd);
         std::vector<Repository> realRepos = ParseRepositories(response);
         if (!realRepos.empty())
@@ -70,7 +51,7 @@ std::vector<Repository> SimulatedGitProvider::FetchRepositories(const UserSessio
             // For each repository, fetch its actual branches
             for (auto& repo : realRepos)
             {
-                std::string branchCmd = "curl -s -H \"Authorization: token " + session.token + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/repos/" + repo.owner + "/" + repo.name + "/branches\"";
+                std::string branchCmd = "curl -s -H \"Authorization: token " + TextUtil::EscapeShellArg(session.token) + "\" -H \"User-Agent: OrbitDesktop\" \"https://api.github.com/repos/" + repo.owner + "/" + repo.name + "/branches\"";
                 std::string branchResponse = TextUtil::ExecuteCommand(branchCmd);
                 repo.branches = ParseBranches(branchResponse);
                 if (repo.branches.empty())
